@@ -102,9 +102,21 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Test the updated admin/user auth + OTP + permissions backend for the Factory Order Management app"
+user_problem_statement: "Fix discrepancy 'Already dispatched — clear' so ONLY the items on the dispatch slip are marked dispatched; remaining order items must stay Pending (partial reconcile), instead of the whole order being marked Dispatched."
 
 backend:
+  - task: "Discrepancy resolve 'clear' — partial reconcile (only on-slip items dispatched)"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "BUG: POST /orders/{oid}/resolve-discrepancy action='clear' previously emptied ALL order items and set status='Dispatched', even when the linked dispatch slip only covered SOME of the order's SKUs (user screenshot: slip #347 had 2 items but whole 8-item order was marked dispatched). FIX: 'clear' now removes ONLY the order lines whose item_id (or normalized item_name) is present on the dispatch slip. Remaining lines are kept and the order stays 'Pending'; it becomes 'Dispatched' only when the slip covers every line. Order is linked into dispatch.order_ids, original_items snapshot preserved, discrepancy_dismissed=true. Response now includes fully_dispatched flag. TEST NEEDED: create a customer + a dispatch (off-order or slip) containing a subset of SKUs dispatched BEFORE an order is entered containing those SKUs plus extra SKUs; GET /orders?status_filter=all to obtain the order's discrepancy.dispatch_id; POST resolve-discrepancy clear; verify remaining order.items == the non-slip SKUs, status stays Pending, fully_dispatched=false, and the on-slip SKUs are removed. Also test the fully-covered case → status Dispatched, items=[], fully_dispatched=true."
+
   - task: "Admin login with OTP (step 1)"
     implemented: true
     working: true
@@ -236,11 +248,14 @@ metadata:
   last_tested: "2026-08-08T13:25:00Z"
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "Discrepancy resolve 'clear' — partial reconcile (only on-slip items dispatched)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+  - agent: "main"
+    message: "Please verify ONLY the new task 'Discrepancy resolve clear — partial reconcile'. Auth: admin@factory.com / admin123 (OTP now disabled for all users, so login returns a token directly). Scenario: (1) create/find a customer, (2) create a dispatch via POST /dispatch/off-order to that customer with a SUBSET of SKUs and a backdated dispatched_at (e.g. 2020-01-01), (3) create an order via POST /orders for the SAME customer containing those subset SKUs PLUS additional SKUs (order entered 'after' the dispatch date), (4) GET /orders?status_filter=all and read that order's discrepancy.dispatch_id, (5) POST /orders/{oid}/resolve-discrepancy {action:'clear', dispatch_id}. EXPECTED: response fully_dispatched=false, order.status stays 'Pending', order.items now contains ONLY the SKUs that were NOT on the slip (the on-slip SKUs are removed), and the order is linked to the dispatch. Also test a fully-covered order (all SKUs on slip) → status 'Dispatched', items=[], fully_dispatched=true. Use POST /items or existing seeded items for valid item_ids."
   - agent: "testing"
     message: "Completed comprehensive backend testing of auth + OTP + permissions features. All 8 test cases passed successfully. Note: Had to reset admin and user passwords in database as they were not matching expected values (admin123/user123). Also reset user's otp_login back to false to match seeded state. Test credentials documented in /app/memory/test_credentials.md. Backend test script available at /app/backend_test.py for future regression testing."

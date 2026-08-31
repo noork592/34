@@ -2114,26 +2114,51 @@ async def resolve_discrepancy(oid: str, body: DiscrepancyResolveIn,
         return {"ok": True, "action": action, "order": await db.orders.find_one({"id": oid}, {"_id": 0})}
 
     # action == "clear" → reconcile the order against the existing dispatch.
+    # IMPORTANT: only the items ACTUALLY on the dispatch slip are treated as
+    # shipped. A discrepancy dispatch frequently covers just SOME of the
+    # order's SKUs, so clearing the WHOLE order (as this used to do) wrongly
+    # showed every line as dispatched. Items that are NOT on the slip stay
+    # Pending so a later slip can ship them. The order becomes fully
+    # Dispatched only when the slip covers every remaining line.
+    slip_ids = {it.get("item_id") for it in (disp.get("items") or []) if it.get("item_id")}
+    slip_names = {(it.get("item_name") or "").strip().lower()
+                  for it in (disp.get("items") or []) if it.get("item_name")}
+
+    def _on_slip(it: Dict[str, Any]) -> bool:
+        iid = it.get("item_id")
+        inm = (it.get("item_name") or "").strip().lower()
+        return bool((iid and iid in slip_ids) or (inm and inm in slip_names))
+
+    order_items = order.get("items") or []
+    remaining_items = [it for it in order_items if not _on_slip(it)]
+    fully_dispatched = len(remaining_items) == 0
+
     # Link this order onto the dispatch for traceability …
     order_ids = list(disp.get("order_ids") or [])
     if oid not in order_ids:
         order_ids.append(oid)
     await db.dispatches.update_one(
         {"id": disp["id"]},
-        {"$set": {"order_ids": order_ids, "order_fully_dispatched": True,
+        {"$set": {"order_ids": order_ids,
+                  "order_fully_dispatched": fully_dispatched,
                   "updated_at": now_iso()}},
     )
-    # … and mark the order Dispatched (its items were already shipped).
+    # Snapshot the pre-clear item list once so restores/reports keep a stable
+    # baseline of what the order originally contained.
     if "original_items" not in order:
         await db.orders.update_one(
-            {"id": oid}, {"$set": {"original_items": order.get("items") or []}}
+            {"id": oid}, {"$set": {"original_items": order_items}}
         )
+    # Remove ONLY the shipped (on-slip) lines. Keep the rest Pending.
     await db.orders.update_one(
         {"id": oid},
-        {"$set": {"items": [], "status": "Dispatched",
+        {"$set": {"items": remaining_items,
+                  "status": "Dispatched" if fully_dispatched else "Pending",
                   "discrepancy_dismissed": True, "updated_at": now_iso()}},
     )
-    return {"ok": True, "action": action, "order": await db.orders.find_one({"id": oid}, {"_id": 0})}
+    return {"ok": True, "action": action,
+            "fully_dispatched": fully_dispatched,
+            "order": await db.orders.find_one({"id": oid}, {"_id": 0})}
 
 
 # ======================== Dashboard Summary ========================
